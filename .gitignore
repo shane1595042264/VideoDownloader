@@ -1,0 +1,27 @@
+# Downloads
+downloads/
+*.mp4
+*.mp3
+*.mkv
+*.webm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+
+# History
+history.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
