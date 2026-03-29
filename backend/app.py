@@ -16,10 +16,181 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import html as html_mod
 import re
 import shutil
 
 import yt_dlp
+
+# Check if curl_cffi is available for browser impersonation
+try:
+    import curl_cffi.requests as cffi_requests
+    HAS_IMPERSONATE = True
+except Exception:
+    # Try to auto-install curl_cffi
+    import subprocess as _sp
+    import sys as _sys
+    try:
+        _sp.run(
+            [_sys.executable, "-m", "pip", "install", "curl_cffi>=0.7.0",
+             "--quiet", "--break-system-packages"],
+            capture_output=True, timeout=120, check=True,
+        )
+        import curl_cffi.requests as cffi_requests
+        HAS_IMPERSONATE = True
+    except Exception:
+        cffi_requests = None
+        HAS_IMPERSONATE = False
+
+
+def _decode_packed_js(packed_code: str) -> str:
+    """Decode a Dean Edwards p.a.c.k.e.r packed JS string."""
+    match = re.search(
+        r"}\('([^'\\]*(?:\\.[^'\\]*)*)',\s*(\d+),\s*(\d+),\s*'([^']+)'\.split",
+        packed_code,
+    )
+    if not match:
+        return ""
+    payload, radix, count, keywords_str = match.groups()
+    radix, count = int(radix), int(count)
+    keywords = keywords_str.split("|")
+
+    def _base_n(num, base):
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        if num < base:
+            return digits[num]
+        return _base_n(num // base, base) + digits[num % base]
+
+    # Replace each base-N token with its keyword
+    def replacer(m):
+        word = m.group(0)
+        idx = int(word, radix) if radix <= 36 else int(word)
+        return keywords[idx] if idx < len(keywords) and keywords[idx] else word
+
+    return re.sub(r'\b\w+\b', replacer, payload)
+
+
+def _try_custom_extract(url: str) -> dict | None:
+    """Try to extract video info from sites that need special handling.
+    Returns a dict with 'title', 'formats', 'thumbnail', etc. or None.
+    """
+    if not HAS_IMPERSONATE:
+        return None
+
+    try:
+        resp = cffi_requests.get(url, impersonate="chrome136", timeout=15)
+        if resp.status_code != 200:
+            return None
+    except Exception:
+        return None
+
+    html = resp.text
+
+    # Look for packed JS with m3u8 URLs (missav, similar sites)
+    eval_blocks = re.findall(
+        r"eval\(function\(p,a,c,k,e,d\)\{.*?\}\(.*?\)\)",
+        html, re.DOTALL,
+    )
+    m3u8_url = None
+    for block in eval_blocks:
+        decoded = _decode_packed_js(block)
+        urls = re.findall(r"https?://[^\s'\"]+\.m3u8", decoded)
+        if urls:
+            # Prefer the playlist.m3u8 (master playlist)
+            for u in urls:
+                if "playlist" in u:
+                    m3u8_url = u
+                    break
+            if not m3u8_url:
+                m3u8_url = urls[0]
+            break
+
+    if not m3u8_url:
+        return None
+
+    # Extract page title
+    title_match = re.search(r"<title[^>]*>([^<]+)</title>", html)
+    title = html_mod.unescape(title_match.group(1).strip()) if title_match else "Video"
+    # Clean up title (remove " - Site Name" suffixes)
+    title = re.split(r'\s*[-|–]\s*(?:MissAV|missav)', title, flags=re.IGNORECASE)[0].strip()
+
+    # Extract thumbnail
+    thumb_match = re.search(r'property="og:image"\s+content="([^"]+)"', html)
+    thumbnail = thumb_match.group(1) if thumb_match else ""
+
+    # Fetch the master m3u8 to get available qualities
+    referer = re.match(r'(https?://[^/]+)', url)
+    referer_url = referer.group(1) + "/" if referer else ""
+    base_url = m3u8_url.rsplit("/", 1)[0]
+
+    try:
+        m3u8_resp = cffi_requests.get(
+            m3u8_url,
+            headers={"Referer": referer_url, "Origin": referer_url.rstrip("/")},
+            impersonate="chrome136",
+            timeout=10,
+        )
+        m3u8_text = m3u8_resp.text
+    except Exception:
+        m3u8_text = ""
+
+    formats = []
+    # Parse HLS master playlist
+    lines = m3u8_text.strip().split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            attrs = line.split(":", 1)[1]
+            res_match = re.search(r"RESOLUTION=(\d+)x(\d+)", attrs)
+            bw_match = re.search(r"BANDWIDTH=(\d+)", attrs)
+            height = int(res_match.group(2)) if res_match else 0
+            bandwidth = int(bw_match.group(1)) if bw_match else 0
+            if i + 1 < len(lines):
+                stream_path = lines[i + 1].strip()
+                stream_url = (
+                    stream_path if stream_path.startswith("http")
+                    else f"{base_url}/{stream_path}"
+                )
+                formats.append({
+                    "format_id": f"hls-{height}p",
+                    "label": f"{height}p",
+                    "ext": "mp4",
+                    "height": height,
+                    "has_audio": True,
+                    "filesize": None,
+                    "type": "video",
+                    "url": stream_url,
+                    "bandwidth": bandwidth,
+                })
+
+    formats.sort(key=lambda x: x.get("height", 0), reverse=True)
+
+    if not formats:
+        # Fallback: just offer the master playlist
+        formats.append({
+            "format_id": "hls-best",
+            "label": "Best Quality",
+            "ext": "mp4",
+            "height": 9999,
+            "has_audio": True,
+            "filesize": None,
+            "type": "video",
+            "url": m3u8_url,
+        })
+
+    return {
+        "title": title,
+        "thumbnail": thumbnail,
+        "duration": 0,
+        "uploader": "",
+        "view_count": None,
+        "upload_date": None,
+        "description": "",
+        "webpage_url": url,
+        "extractor": "custom",
+        "formats": formats,
+        "_referer": referer_url,
+        "_m3u8_base": base_url,
+    }
 
 # ---------------------------------------------------------------------------
 # Config
@@ -49,7 +220,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "has_ffmpeg": HAS_FFMPEG}
+    return {"status": "ok", "has_ffmpeg": HAS_FFMPEG, "has_impersonate": HAS_IMPERSONATE}
 
 # ---------------------------------------------------------------------------
 # In-memory state
@@ -90,17 +261,37 @@ async def get_video_info(payload: dict):
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
 
+    # First, try yt-dlp's built-in extractors
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
     }
 
+    loop = asyncio.get_event_loop()
+    info = None
+    use_custom = False
+
     try:
-        loop = asyncio.get_event_loop()
         info = await loop.run_in_executor(None, _extract_info, url, ydl_opts)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as ydl_err:
+        print(f"[INFO] yt-dlp failed for {url}: {ydl_err}")
+        # yt-dlp failed — try our custom extractor (handles Cloudflare sites)
+        try:
+            custom = await loop.run_in_executor(None, _try_custom_extract, url)
+            if custom:
+                return custom
+            print(f"[INFO] Custom extractor returned None for {url}")
+        except Exception as custom_err:
+            print(f"[ERROR] Custom extractor failed for {url}: {custom_err}")
+            import traceback
+            traceback.print_exc()
+
+    if info is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract video info. The site may not be supported.",
+        )
 
     # Build format list
     formats = []
@@ -226,6 +417,11 @@ async def get_video_info(payload: dict):
     }
 
 
+def _clean_error(msg: str) -> str:
+    """Strip ANSI escape codes from yt-dlp error messages."""
+    return re.sub(r'\x1b\[[0-9;]*m', '', msg)
+
+
 def _extract_info(url: str, opts: dict) -> dict:
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
@@ -240,17 +436,24 @@ async def start_download(payload: dict):
     format_id = payload.get("format_id", "bestvideo+bestaudio/best")
     fmt_type = payload.get("type", "video")  # "video" or "audio"
     title = payload.get("title", "video")
+    # Custom-extracted fields (for Cloudflare-protected sites)
+    hls_url = payload.get("hls_url", "")
+    referer = payload.get("referer", "")
 
-    if not url:
+    if not url and not hls_url:
         raise HTTPException(status_code=400, detail="URL is required")
+
+    # If we have a direct HLS URL from custom extraction, use that
+    download_url = hls_url if hls_url else url
 
     # For specific video-only format IDs (e.g. "137", "401"), always add
     # best audio so the user doesn't get a silent file.
     # Only do this if ffmpeg is available (merging requires ffmpeg).
-    if HAS_FFMPEG:
+    if HAS_FFMPEG and not hls_url:
         if (fmt_type == "video"
                 and "+" not in format_id
-                and format_id not in ("best", "bestvideo+bestaudio/best")):
+                and format_id not in ("best", "bestvideo+bestaudio/best")
+                and not format_id.startswith("hls-")):
             format_id = f"{format_id}+bestaudio"
 
     task_id = str(uuid.uuid4())[:8]
@@ -264,16 +467,17 @@ async def start_download(payload: dict):
     }
 
     # Fire-and-forget download in background
-    asyncio.create_task(_run_download(task_id, url, format_id, title))
+    asyncio.create_task(_run_download(task_id, download_url, format_id, title, referer))
     return {"task_id": task_id}
 
 
-async def _run_download(task_id: str, url: str, format_id: str, title: str):
+async def _run_download(task_id: str, url: str, format_id: str, title: str, referer: str = ""):
     """Run yt-dlp download in a thread and broadcast progress via WebSocket."""
     safe_title = "".join(c if c.isalnum() or c in " -_." else "_" for c in title)[:80]
     output_template = str(DOWNLOAD_DIR / f"{task_id}_{safe_title}.%(ext)s")
 
     is_audio = format_id == "bestaudio"
+    is_hls = format_id.startswith("hls-")
 
     # Track the final filename from yt-dlp's postprocessor hooks
     final_filename_holder = {"path": None}
@@ -283,7 +487,6 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str):
             final_filename_holder["path"] = d.get("info_dict", {}).get("filepath")
 
     ydl_opts = {
-        "format": format_id,
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
@@ -291,6 +494,17 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str):
         "postprocessor_hooks": [_pp_hook],
         "keepvideo": False,
     }
+
+    # For HLS streams (custom-extracted), use 'best' format and set Referer
+    if is_hls:
+        ydl_opts["format"] = "best"
+        if referer:
+            ydl_opts["http_headers"] = {
+                "Referer": referer,
+                "Origin": referer.rstrip("/"),
+            }
+    else:
+        ydl_opts["format"] = format_id
 
     if HAS_FFMPEG:
         if not is_audio:
@@ -359,7 +573,7 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str):
     except Exception as e:
         download_progress[task_id].update({
             "status": "error",
-            "error": str(e),
+            "error": _clean_error(str(e)),
         })
 
     # Notify all connected WebSocket clients
@@ -376,8 +590,8 @@ def _progress_hook(task_id: str, d: dict):
         download_progress[task_id].update({
             "status": "downloading",
             "percent": _parse_percent(d.get("_percent_str", "0%")),
-            "speed": d.get("_speed_str", ""),
-            "eta": d.get("_eta_str", ""),
+            "speed": _clean_error(d.get("_speed_str", "")),
+            "eta": _clean_error(d.get("_eta_str", "")),
             "downloaded": d.get("downloaded_bytes", 0),
             "total": d.get("total_bytes") or d.get("total_bytes_estimate", 0),
         })
@@ -397,7 +611,8 @@ def _progress_hook(task_id: str, d: dict):
 
 def _parse_percent(s: str) -> float:
     try:
-        return float(s.strip().replace("%", ""))
+        clean = _clean_error(s).strip().replace("%", "")
+        return float(clean)
     except Exception:
         return 0
 

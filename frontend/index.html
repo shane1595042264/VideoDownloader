@@ -785,15 +785,20 @@
             hideError();
 
             try {
+                const downloadBody = {
+                    url,
+                    format_id: selectedFormat.format_id,
+                    type: selectedFormat.type || 'video',
+                    title: videoInfo.title,
+                };
+                // Pass through HLS URL and referer for custom-extracted sites
+                if (selectedFormat.url) downloadBody.hls_url = selectedFormat.url;
+                if (videoInfo._referer) downloadBody.referer = videoInfo._referer;
+
                 const res = await fetch(`${API}/api/download`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        url,
-                        format_id: selectedFormat.format_id,
-                        type: selectedFormat.type || 'video',
-                        title: videoInfo.title,
-                    })
+                    body: JSON.stringify(downloadBody)
                 });
                 if (!res.ok) throw new Error('Failed to start download');
                 const data = await res.json();
