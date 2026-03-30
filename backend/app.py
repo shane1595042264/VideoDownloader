@@ -222,6 +222,7 @@ app.add_middleware(
 async def health():
     return {"status": "ok", "has_ffmpeg": HAS_FFMPEG, "has_impersonate": HAS_IMPERSONATE}
 
+
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
@@ -509,7 +510,7 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str, refe
     if HAS_FFMPEG:
         if not is_audio:
             ydl_opts["merge_output_format"] = "mp4"
-            # Re-encode audio to AAC for QuickTime compatibility
+            # Re-encode audio to AAC for QuickTime compatibility (merger case)
             ydl_opts["postprocessor_args"] = {
                 "merger": ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"],
             }
@@ -554,6 +555,16 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str, refe
                 except Exception:
                     pass
 
+        # Ensure QuickTime compatibility (re-encode VP9/opus etc.)
+        if downloaded_file and not is_audio:
+            full_path = str(DOWNLOAD_DIR / downloaded_file)
+            download_progress[task_id].update({
+                "status": "processing",
+                "percent": 99,
+            })
+            await _broadcast(task_id)
+            await loop.run_in_executor(None, _ensure_qt_compatible, full_path)
+
         download_progress[task_id].update({
             "status": "completed",
             "percent": 100,
@@ -583,6 +594,70 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str, refe
 def _do_download(url: str, opts: dict):
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+
+
+def _ensure_qt_compatible(filepath: str) -> str:
+    """Re-encode video to H.264+AAC if codecs aren't QuickTime-compatible.
+
+    Returns the (possibly new) filepath.
+    """
+    import subprocess
+    if not HAS_FFMPEG or not filepath or not os.path.isfile(filepath):
+        return filepath
+
+    # Use ffprobe to detect codecs
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", filepath],
+            capture_output=True, text=True, timeout=15,
+        )
+        if probe.returncode != 0:
+            return filepath
+        import json as _json
+        streams = _json.loads(probe.stdout).get("streams", [])
+    except Exception:
+        return filepath
+
+    vcodec = ""
+    acodec = ""
+    for s in streams:
+        if s.get("codec_type") == "video" and not vcodec:
+            vcodec = s.get("codec_name", "")
+        elif s.get("codec_type") == "audio" and not acodec:
+            acodec = s.get("codec_name", "")
+
+    qt_video = {"h264", "hevc", "mpeg4", "prores"}  # hevc supported on modern macOS
+    qt_audio = {"aac", "mp3", "alac", "pcm_s16le", "pcm_s24le"}
+
+    needs_video_reencode = vcodec and vcodec not in qt_video
+    needs_audio_reencode = acodec and acodec not in qt_audio
+
+    if not needs_video_reencode and not needs_audio_reencode:
+        return filepath  # Already compatible
+
+    print(f"[COMPAT] Re-encoding for QuickTime: video={vcodec}->{'libx264' if needs_video_reencode else 'copy'}, "
+          f"audio={acodec}->{'aac' if needs_audio_reencode else 'copy'}")
+
+    out_path = filepath.rsplit(".", 1)[0] + "_qt.mp4"
+    cmd = ["ffmpeg", "-y", "-i", filepath]
+    cmd += ["-c:v", "libx264", "-crf", "20", "-preset", "fast"] if needs_video_reencode else ["-c:v", "copy"]
+    cmd += ["-c:a", "aac", "-b:a", "192k"] if needs_audio_reencode else ["-c:a", "copy"]
+    cmd += ["-movflags", "+faststart", out_path]
+
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=600, check=True)
+        # Replace original with re-encoded version
+        os.remove(filepath)
+        os.rename(out_path, filepath)
+        print(f"[COMPAT] Re-encode complete: {filepath}")
+    except Exception as e:
+        print(f"[COMPAT] Re-encode failed: {e}")
+        # Clean up partial output
+        if os.path.exists(out_path):
+            os.remove(out_path)
+
+    return filepath
 
 
 def _progress_hook(task_id: str, d: dict):
