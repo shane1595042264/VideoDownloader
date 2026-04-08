@@ -518,6 +518,62 @@
         .sites-strip span:hover { opacity: 1; }
 
         /* ============================================================
+           FEEDBACK FORM
+           ============================================================ */
+        .feedback-form { display: flex; flex-direction: column; gap: 16px; }
+        .feedback-form label {
+            font-size: 13px; font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 4px; display: block;
+        }
+        .feedback-form input,
+        .feedback-form textarea {
+            width: 100%;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border-glass);
+            border-radius: var(--radius-sm);
+            padding: 14px 18px;
+            font-size: 14px;
+            color: var(--text-primary);
+            font-family: inherit;
+            outline: none;
+            transition: var(--transition);
+        }
+        .feedback-form input::placeholder,
+        .feedback-form textarea::placeholder { color: var(--text-muted); }
+        .feedback-form input:focus,
+        .feedback-form textarea:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+        .feedback-form textarea { min-height: 120px; resize: vertical; }
+        .feedback-form .field-group { display: flex; flex-direction: column; }
+        .feedback-result {
+            display: none; text-align: center; padding: 32px 0;
+        }
+        .feedback-result.active { display: block; }
+        .feedback-result .check {
+            width: 56px; height: 56px;
+            background: rgba(0,184,148,0.15);
+            border-radius: 50%;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-size: 28px; color: var(--success);
+            margin-bottom: 16px;
+        }
+        .feedback-result h3 { font-size: 18px; margin-bottom: 8px; }
+        .feedback-result p { color: var(--text-secondary); font-size: 14px; }
+        .feedback-error {
+            display: none;
+            background: rgba(255,107,107,0.08);
+            border: 1px solid rgba(255,107,107,0.2);
+            border-radius: var(--radius-sm);
+            padding: 14px 18px;
+            color: var(--error);
+            font-size: 14px;
+        }
+        .feedback-error.active { display: block; }
+
+        /* ============================================================
            RESPONSIVE
            ============================================================ */
         @media (max-width: 640px) {
@@ -555,6 +611,9 @@
             </button>
             <button class="tab-btn" data-tab="history" onclick="switchTab('history')">
                 &#128340; History
+            </button>
+            <button class="tab-btn" data-tab="feedback" onclick="switchTab('feedback')">
+                &#128172; Feedback
             </button>
         </div>
 
@@ -656,6 +715,47 @@
                 </div>
             </div>
         </div>
+
+        <!-- ======================= FEEDBACK TAB ======================= -->
+        <div id="tab-feedback" style="display:none;">
+            <div class="glass-card">
+                <h3 style="margin-bottom:8px;">Send Feedback</h3>
+                <p style="color:var(--text-secondary); font-size:14px; margin-bottom:24px;">
+                    Report a bug, request a feature, or share your thoughts.
+                </p>
+
+                <div id="feedback-form-wrap">
+                    <div class="feedback-error" id="feedback-error"></div>
+                    <form class="feedback-form" id="feedback-form" onsubmit="submitFeedback(event)">
+                        <div class="field-group">
+                            <label for="feedback-subject">Subject *</label>
+                            <input type="text" id="feedback-subject" placeholder="e.g. Bug: download fails on TikTok" required>
+                        </div>
+                        <div class="field-group">
+                            <label for="feedback-message">Message *</label>
+                            <textarea id="feedback-message" placeholder="Describe the issue or suggestion in detail..." required></textarea>
+                        </div>
+                        <div class="field-group">
+                            <label for="feedback-email">Email (optional)</label>
+                            <input type="email" id="feedback-email" placeholder="your@email.com — if you'd like a reply">
+                        </div>
+                        <button type="submit" class="btn-primary" id="feedback-submit-btn" style="align-self:flex-start;">
+                            <span class="spinner" id="feedback-spinner"></span>
+                            <span id="feedback-submit-text">Submit Feedback</span>
+                        </button>
+                    </form>
+                </div>
+
+                <div class="feedback-result" id="feedback-result">
+                    <div class="check">&#10003;</div>
+                    <h3>Thanks for your feedback!</h3>
+                    <p id="feedback-ticket-msg">Your feedback has been submitted.</p>
+                    <button class="btn-primary" style="margin-top:20px;" onclick="resetFeedback()">
+                        Send Another
+                    </button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- ========================== JAVASCRIPT ========================== -->
@@ -687,8 +787,9 @@
         // ---- Tab switching ----
         function switchTab(tab) {
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-            document.getElementById('tab-download').style.display = tab === 'download' ? 'block' : 'none';
-            document.getElementById('tab-history').style.display  = tab === 'history'  ? 'block' : 'none';
+            document.getElementById('tab-download').style.display  = tab === 'download' ? 'block' : 'none';
+            document.getElementById('tab-history').style.display   = tab === 'history'  ? 'block' : 'none';
+            document.getElementById('tab-feedback').style.display  = tab === 'feedback' ? 'block' : 'none';
             if (tab === 'history') loadHistory();
         }
 
@@ -964,6 +1065,59 @@
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
+        }
+
+        // ---- Feedback ----
+        async function submitFeedback(e) {
+            e.preventDefault();
+            const subject = document.getElementById('feedback-subject').value.trim();
+            const message = document.getElementById('feedback-message').value.trim();
+            const email   = document.getElementById('feedback-email').value.trim();
+
+            if (!subject || !message) return;
+
+            const btn = document.getElementById('feedback-submit-btn');
+            const spinner = document.getElementById('feedback-spinner');
+            const btnText = document.getElementById('feedback-submit-text');
+            const errEl = document.getElementById('feedback-error');
+
+            btn.disabled = true;
+            spinner.classList.add('active');
+            btnText.textContent = 'Submitting...';
+            errEl.classList.remove('active');
+
+            try {
+                const res = await fetch(`${API}/api/feedback`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ subject, message, email })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || 'Failed to submit feedback');
+                }
+                const data = await res.json();
+                const ticketMsg = data.ticket
+                    ? `Ticket ${data.ticket} has been created. We'll look into it!`
+                    : 'Your feedback has been submitted.';
+                document.getElementById('feedback-ticket-msg').textContent = ticketMsg;
+                document.getElementById('feedback-form-wrap').style.display = 'none';
+                document.getElementById('feedback-result').classList.add('active');
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.classList.add('active');
+            } finally {
+                btn.disabled = false;
+                spinner.classList.remove('active');
+                btnText.textContent = 'Submit Feedback';
+            }
+        }
+
+        function resetFeedback() {
+            document.getElementById('feedback-form').reset();
+            document.getElementById('feedback-form-wrap').style.display = 'block';
+            document.getElementById('feedback-result').classList.remove('active');
+            document.getElementById('feedback-error').classList.remove('active');
         }
 
         function saveFile() {

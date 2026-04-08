@@ -4,10 +4,13 @@ A modern, scalable video downloader supporting YouTube, Bilibili, and 1000+ site
 """
 
 import asyncio
+import base64
 import json
 import os
 import time
 import uuid
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Optional
 
@@ -771,6 +774,72 @@ async def get_status(task_id: str):
     if task_id not in download_progress:
         raise HTTPException(status_code=404, detail="Task not found")
     return download_progress[task_id]
+
+
+# ---------------------------------------------------------------------------
+# API: User feedback → Jira ticket
+# ---------------------------------------------------------------------------
+JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "https://a1595042264.atlassian.net")
+JIRA_EMAIL = os.getenv("JIRA_EMAIL", "")
+JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN", "")
+JIRA_PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "SHAN")
+
+
+@app.post("/api/feedback")
+async def submit_feedback(body: dict):
+    subject = (body.get("subject") or "").strip()
+    message = (body.get("message") or "").strip()
+    email = (body.get("email") or "").strip()
+
+    if not subject or not message:
+        raise HTTPException(status_code=400, detail="Subject and message are required")
+
+    if not JIRA_EMAIL or not JIRA_API_TOKEN:
+        raise HTTPException(status_code=503, detail="Feedback service is not configured")
+
+    # Build Jira issue payload
+    description_text = message
+    if email:
+        description_text += f"\n\nSubmitted by: {email}"
+
+    jira_payload = json.dumps({
+        "fields": {
+            "project": {"key": JIRA_PROJECT_KEY},
+            "summary": f"[VideoDownloader] {subject}",
+            "description": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {
+                        "type": "paragraph",
+                        "content": [{"type": "text", "text": description_text}],
+                    }
+                ],
+            },
+            "issuetype": {"name": "Task"},
+        }
+    }).encode("utf-8")
+
+    credentials = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_API_TOKEN}".encode()).decode()
+    req = urllib.request.Request(
+        f"{JIRA_BASE_URL}/rest/api/3/issue",
+        data=jira_payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Basic {credentials}",
+        },
+        method="POST",
+    )
+
+    try:
+        resp = await asyncio.to_thread(urllib.request.urlopen, req, timeout=15)
+        result = json.loads(resp.read().decode())
+        return {"status": "ok", "ticket": result.get("key")}
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else str(e)
+        raise HTTPException(status_code=502, detail=f"Failed to create ticket: {error_body}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to create ticket: {str(e)}")
 
 
 # ---------------------------------------------------------------------------
