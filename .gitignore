@@ -18,6 +18,9 @@ venv/
 # History
 history.json
 
+# Cookies (sensitive)
+cookies.txt
+
 # IDE
 .vscode/
 .idea/

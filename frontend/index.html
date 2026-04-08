@@ -615,6 +615,9 @@
             <button class="tab-btn" data-tab="feedback" onclick="switchTab('feedback')">
                 &#128172; Feedback
             </button>
+            <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">
+                &#9881; Settings
+            </button>
         </div>
 
         <!-- ======================= DOWNLOAD TAB ======================= -->
@@ -695,6 +698,7 @@
                 <span>Bilibili</span>
                 <span>Twitter / X</span>
                 <span>TikTok</span>
+                <span>Amazon*</span>
                 <span>Vimeo</span>
                 <span>Reddit</span>
                 <span>1000+</span>
@@ -711,6 +715,45 @@
                 <div class="history-list" id="history-list">
                     <p style="color:var(--text-muted); text-align:center; padding:24px; font-size:14px;">
                         No downloads yet. Paste a URL above to get started!
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================= SETTINGS TAB ======================= -->
+        <div id="tab-settings" style="display:none;">
+            <div class="glass-card">
+                <h3 style="margin-bottom:8px;">Cookie Authentication</h3>
+                <p style="color:var(--text-secondary); font-size:14px; margin-bottom:16px;">
+                    Upload cookies to download from sites that require login (Amazon Prime Video, Netflix trailers, etc.).
+                    Export cookies from your browser in Netscape/Mozilla format using a browser extension like
+                    <strong>Get cookies.txt LOCALLY</strong>.
+                </p>
+
+                <div id="cookie-status-msg" style="margin-bottom:16px;"></div>
+
+                <div class="feedback-form" style="display:flex; flex-direction:column; gap:16px;">
+                    <div class="field-group">
+                        <label for="cookie-textarea">Paste cookies.txt content</label>
+                        <textarea id="cookie-textarea" placeholder="# Netscape HTTP Cookie File&#10;.amazon.com&#9;TRUE&#9;/&#9;FALSE&#9;0&#9;session-id&#9;xxx-xxxxxxx-xxxxxxx" style="min-height:160px; resize:vertical; background:rgba(255,255,255,0.05); border:1px solid var(--border-glass); border-radius:var(--radius-xs); padding:12px 16px; color:var(--text-primary); font-family:'Courier New',monospace; font-size:13px;"></textarea>
+                    </div>
+                    <div style="display:flex; gap:12px;">
+                        <button class="btn-primary" id="cookie-upload-btn" onclick="uploadCookies()" style="flex:0 0 auto;">
+                            <span class="spinner" id="cookie-spinner"></span>
+                            <span id="cookie-upload-text">Upload Cookies</span>
+                        </button>
+                        <button class="btn-primary" id="cookie-delete-btn" onclick="deleteCookies()" style="flex:0 0 auto; background:rgba(255,107,107,0.15); color:var(--error);">
+                            Remove Cookies
+                        </button>
+                    </div>
+                </div>
+
+                <div style="margin-top:24px; padding-top:20px; border-top:1px solid var(--border-glass);">
+                    <h4 style="margin-bottom:8px; font-size:14px; color:var(--text-secondary);">Amazon Prime Video Note</h4>
+                    <p style="color:var(--text-muted); font-size:13px; line-height:1.6;">
+                        Most Amazon Prime Video content uses DRM protection and cannot be downloaded.
+                        However, trailers, previews, and some free content may work with cookie authentication.
+                        Upload your Amazon cookies above to try.
                     </p>
                 </div>
             </div>
@@ -789,8 +832,10 @@
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
             document.getElementById('tab-download').style.display  = tab === 'download' ? 'block' : 'none';
             document.getElementById('tab-history').style.display   = tab === 'history'  ? 'block' : 'none';
+            document.getElementById('tab-settings').style.display  = tab === 'settings' ? 'block' : 'none';
             document.getElementById('tab-feedback').style.display  = tab === 'feedback' ? 'block' : 'none';
             if (tab === 'history') loadHistory();
+            if (tab === 'settings') loadCookieStatus();
         }
 
         // ---- Fetch video info ----
@@ -1122,6 +1167,67 @@
 
         function saveFile() {
             // triggered via dynamic onclick
+        }
+
+        // ---- Cookie Management ----
+        async function loadCookieStatus() {
+            try {
+                const res = await fetch(`${API}/api/cookies/status`);
+                const data = await res.json();
+                const el = document.getElementById('cookie-status-msg');
+                if (data.has_cookies) {
+                    el.innerHTML = '<span style="color:var(--success);">&#10003; Cookies are configured.</span>';
+                } else {
+                    el.innerHTML = '<span style="color:var(--text-muted);">No cookies configured.</span>';
+                }
+            } catch (e) {
+                console.error('Failed to check cookie status', e);
+            }
+        }
+
+        async function uploadCookies() {
+            const content = document.getElementById('cookie-textarea').value.trim();
+            if (!content) return;
+
+            const btn = document.getElementById('cookie-upload-btn');
+            const spinner = document.getElementById('cookie-spinner');
+            const btnText = document.getElementById('cookie-upload-text');
+            btn.disabled = true;
+            spinner.classList.add('active');
+            btnText.textContent = 'Uploading...';
+
+            try {
+                const res = await fetch(`${API}/api/cookies`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.detail || 'Failed to upload cookies');
+                }
+                document.getElementById('cookie-textarea').value = '';
+                const el = document.getElementById('cookie-status-msg');
+                el.innerHTML = '<span style="color:var(--success);">&#10003; Cookies uploaded successfully!</span>';
+            } catch (e) {
+                const el = document.getElementById('cookie-status-msg');
+                el.innerHTML = `<span style="color:var(--error);">${escapeHtml(e.message)}</span>`;
+            } finally {
+                btn.disabled = false;
+                spinner.classList.remove('active');
+                btnText.textContent = 'Upload Cookies';
+            }
+        }
+
+        async function deleteCookies() {
+            if (!confirm('Remove all stored cookies?')) return;
+            try {
+                await fetch(`${API}/api/cookies`, { method: 'DELETE' });
+                const el = document.getElementById('cookie-status-msg');
+                el.innerHTML = '<span style="color:var(--text-muted);">Cookies removed.</span>';
+            } catch (e) {
+                console.error('Failed to delete cookies', e);
+            }
         }
     </script>
 </body>

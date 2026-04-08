@@ -200,9 +200,22 @@ def _try_custom_extract(url: str) -> dict | None:
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
+COOKIES_FILE = BASE_DIR / "cookies.txt"
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = BASE_DIR / "history.json"
+
+
+def _is_amazon_url(url: str) -> bool:
+    """Check if a URL is from Amazon Prime Video."""
+    return bool(re.search(r'(amazon\.(com|co\.\w+|de|fr|it|es)|primevideo\.com)', url, re.IGNORECASE))
+
+
+def _get_cookie_opts() -> dict:
+    """Return yt-dlp cookie options if a cookies file exists."""
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
+        return {"cookiefile": str(COOKIES_FILE)}
+    return {}
 
 app = FastAPI(title="VideoDownloader", version="1.0.0")
 
@@ -224,6 +237,42 @@ app.add_middleware(
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "has_ffmpeg": HAS_FFMPEG, "has_impersonate": HAS_IMPERSONATE}
+
+
+# ---------------------------------------------------------------------------
+# API: Cookie management (for authenticated downloads)
+# ---------------------------------------------------------------------------
+@app.get("/api/cookies/status")
+async def cookies_status():
+    has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
+    return {"has_cookies": has_cookies}
+
+
+@app.post("/api/cookies")
+async def upload_cookies(payload: dict):
+    content = payload.get("content", "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Cookie content is required")
+    # Basic validation: Netscape cookie format starts with comments or domain lines
+    lines = [l for l in content.split("\n") if l.strip() and not l.startswith("#")]
+    if not lines:
+        raise HTTPException(status_code=400, detail="No valid cookie entries found")
+    for line in lines[:5]:
+        parts = line.split("\t")
+        if len(parts) < 7:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid cookie format. Please use Netscape/Mozilla cookies.txt format (tab-separated, 7 fields per line).",
+            )
+    COOKIES_FILE.write_text(content, encoding="utf-8")
+    return {"status": "ok", "message": "Cookies uploaded successfully"}
+
+
+@app.delete("/api/cookies")
+async def delete_cookies():
+    if COOKIES_FILE.exists():
+        COOKIES_FILE.unlink()
+    return {"status": "ok", "message": "Cookies removed"}
 
 
 # ---------------------------------------------------------------------------
@@ -270,11 +319,11 @@ async def get_video_info(payload: dict):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
+        **_get_cookie_opts(),
     }
 
     loop = asyncio.get_event_loop()
     info = None
-    use_custom = False
 
     try:
         info = await loop.run_in_executor(None, _extract_info, url, ydl_opts)
@@ -292,6 +341,15 @@ async def get_video_info(payload: dict):
             traceback.print_exc()
 
     if info is None:
+        if _is_amazon_url(url):
+            detail = (
+                "Amazon Prime Video content is DRM-protected and cannot be downloaded. "
+                "Trailers and previews may work if you upload your Amazon cookies "
+                "(Settings > Cookies)."
+            )
+            if not (COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0):
+                detail += " No cookies are currently configured — upload your Amazon cookies first."
+            raise HTTPException(status_code=400, detail=detail)
         raise HTTPException(
             status_code=400,
             detail="Could not extract video info. The site may not be supported.",
@@ -497,6 +555,7 @@ async def _run_download(task_id: str, url: str, format_id: str, title: str, refe
         "progress_hooks": [lambda d: _progress_hook(task_id, d)],
         "postprocessor_hooks": [_pp_hook],
         "keepvideo": False,
+        **_get_cookie_opts(),
     }
 
     # For HLS streams (custom-extracted), use 'best' format and set Referer
